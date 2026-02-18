@@ -1,0 +1,2 @@
+-I\msys64\ucrt64\include
+-DWIN32
