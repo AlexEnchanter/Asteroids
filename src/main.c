@@ -1,5 +1,9 @@
+// #include "vulkan/vulkan_core.h"
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+
+#include <cglm/cglm.h>
+#include <cglm/mat2.h>
 
 #include <stdio.h>
 #include <stdint.h>
@@ -7,6 +11,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdint.h>
+
 
 #include "helper.h"
 
@@ -65,8 +70,15 @@ VkPipelineLayout pipeline_layout;
 VkPipeline graphics_pipeline;
 
 VkCommandPool command_pool;
- 
-#define MAX_FRAMES_IN_FLIGHT 2
+
+VkBuffer vertex_buffer;
+VkDeviceMemory vertex_buffer_memory;
+VkBuffer index_buffer;
+VkDeviceMemory index_buffer_memory;
+VkBuffer staging_buffer;
+VkDeviceMemory staging_buffer_memory;
+
+#define MAX_FRAMES_IN_FLIGHT 1
 VkFence frame_fences[MAX_FRAMES_IN_FLIGHT];
 VkSemaphore acquire_semaphores[MAX_FRAMES_IN_FLIGHT];
 VkCommandBuffer command_buffers[MAX_FRAMES_IN_FLIGHT]; 
@@ -75,6 +87,103 @@ uint32_t frame_index = 0; // 0..MAX_FRAMES_IN_FLIGHT - 1
 VkSemaphore* submit_semaphores; // SwapChainImages.count 
 
 bool framebuffer_resized = false;
+
+
+typedef struct Vertex {
+    vec2 pos;
+    vec3 color;
+} Vertex;
+
+#define WHITE 1.0f, 1.0f, 1.0f
+Vertex vertices[100] = {
+    // {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    // {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+    // {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
+    // {{-0.5f, 0.5f}, {1.0f, 0.0f, 0.5f}},
+    // {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}}
+
+
+};
+
+
+const uint32_t VERTEX_COUNT = sizeof(vertices) / sizeof(vertices[0]);
+
+const uint32_t INDICES_COUNT = 6;
+const uint16_t indices[] = {0, 1, 2, 2, 3, 0};
+
+
+// --- Game stuff 
+typedef struct Shape {
+    float scale;
+    Vertex vertices[10]; // shape in NDC.
+    int count;
+    
+} Shape;
+
+typedef struct Entity {
+    vec2 pos; // Pos in NDC
+    int shape_index;
+    vec2 speed;
+    float rotation;
+    float rotation_speed;
+} Entity;
+
+double delta_time = 0.0f;
+const double max_delta_time = 0.1f;
+int frame_count = 0;
+double last_time;
+
+
+Shape shapes[] = {
+    {
+        .scale = 0.1f,
+        .vertices = {
+            // Ship 
+            {{0.0f, -1.0f}, {WHITE}}, // Top
+            {{-0.5f, 0.5f}, {WHITE}}, // Bottom lef 
+            {{0.0f, 0.25f}, {WHITE}}, // Bottom middle
+            {{0.5f, 0.5f}, {WHITE}},  // Bottom right 
+            {{0.0f, -1.0f}, {WHITE}}, // Top
+        },
+        .count = 5
+    },
+
+    {
+        // Box
+        .scale = 0.5,
+        .vertices = {
+            {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+            {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+            {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
+            {{-0.5f, 0.5f}, {1.0f, 0.0f, 0.5f}},
+            {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}}
+        },
+        .count = 5
+    }
+};
+
+Entity entities[100] = {0}; 
+int entities_count = 0;
+
+#define ATTRIBUTE_COUNT 2
+void get_attribute_descriptions(VkVertexInputAttributeDescription attribute_descriptions[ATTRIBUTE_COUNT]) {
+    attribute_descriptions[0].binding = 0;
+    attribute_descriptions[0].location = 0;
+    attribute_descriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
+    attribute_descriptions[0].offset = offsetof(Vertex, pos);
+
+    attribute_descriptions[1].binding = 0;
+    attribute_descriptions[1].location = 1;
+    attribute_descriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attribute_descriptions[1].offset = offsetof(Vertex, color);
+}
+
+void get_binding_description(VkVertexInputBindingDescription* binding_description) {
+    binding_description->binding = 0;
+    binding_description->stride = sizeof(Vertex);
+    binding_description->inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+}
+
 
 bool check_validation_layer_support() {
     uint32_t layer_count;
@@ -126,18 +235,53 @@ const char** get_required_extensions(uint32_t* extension_count) {
     return extensions;
 }
 
-static void framebuffer_resize_callback(GLFWwindow* window, int width, int height) {
+void framebuffer_resize_callback(GLFWwindow* window, int width, int height) {
     // printf("Window resized: w: %d, h: %d\n", width, height);
     framebuffer_resized = true;
+    // last_time = glfwGetTime();
 }
+
+bool key_left = false;
+bool key_right = false;
+bool key_up = false;
+void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    if (action == GLFW_PRESS)  {
+        switch (key) {
+            case GLFW_KEY_LEFT:
+                key_left = true;
+                break;
+            case GLFW_KEY_RIGHT:
+                key_right = true;
+                break;
+            case GLFW_KEY_UP:
+                key_up = true;
+                break;
+        }
+    }
+    else if (action == GLFW_RELEASE) {
+        switch (key) {
+            case GLFW_KEY_LEFT:
+                key_left = false;
+                break;
+            case GLFW_KEY_RIGHT:
+                key_right = false;
+                break;
+            case GLFW_KEY_UP:
+                key_up = false;
+                break;
+        }
+        
+    }
+}
+
 
 void init_window() {
     glfwInit();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    // glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
     window = glfwCreateWindow(WIDTH, HEIGHT, "Astroids", NULL, NULL);
     glfwSetFramebufferSizeCallback(window, framebuffer_resize_callback);
+    glfwSetKeyCallback(window, key_callback);
 }
 
 VkResult create_debug_utils_messenger_EXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* p_create_info, const VkAllocationCallbacks* p_allocator, VkDebugUtilsMessengerEXT* p_debug_messenger) {
@@ -327,18 +471,20 @@ VkSurfaceFormatKHR choose_swap_surface_format(const VkSurfaceFormatKHR* availabl
 
 VkPresentModeKHR choose_swap_present_mode(const VkPresentModeKHR* available_present_modes, uint32_t present_modes_count) {
     for (size_t i = 0; i < present_modes_count; i++) {
-        if (available_present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
+        if (available_present_modes[i] == /* VK_PRESENT_MODE_IMMEDIATE_KHR */VK_PRESENT_MODE_MAILBOX_KHR) {
             return available_present_modes[i];
         }
     }
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 
-static uint32_t clamp(uint32_t value, uint32_t min, uint32_t max) {
+uint32_t clamp(uint32_t value, uint32_t min, uint32_t max) {
     if (value < min) return min;
     if (value > max) return max;
     return value;
 }
+
+
 
 VkExtent2D choose_swap_extent(const VkSurfaceCapabilitiesKHR* capabilities) {
     if (capabilities->currentExtent.width != UINT32_MAX) {
@@ -472,6 +618,8 @@ int create_logical_device() {
     create_info.queueCreateInfoCount = unique_queue_families_count;
 
     VkPhysicalDeviceFeatures device_features = {0};
+    device_features.wideLines = VK_TRUE;
+
     create_info.pEnabledFeatures = &device_features;
     create_info.enabledExtensionCount = device_extensions_count;
     create_info.ppEnabledExtensionNames = device_extensions;
@@ -613,7 +761,10 @@ int create_graphics_pipeline() {
     size = 0;
     char* frag_shader_code = readFile("shaders/frag.spv", &size);
     VkShaderModule frag_shader_module = create_shader_module(frag_shader_code, size);
-
+    
+    // size = 0;
+    // char* geom_shader_code = readFile("shaders/geom.spv", &size);
+    // VkShaderModule geom_shader_module = create_shader_module(geom_shader_code, size);
 
     VkPipelineShaderStageCreateInfo vert_shader_stage_info = {0};
     vert_shader_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -627,16 +778,31 @@ int create_graphics_pipeline() {
     frag_shader_stage_info.module = frag_shader_module;
     frag_shader_stage_info.pName = "main";
 
-    VkPipelineShaderStageCreateInfo shader_stages[] = {vert_shader_stage_info, frag_shader_stage_info};
+    // VkPipelineShaderStageCreateInfo geom_shader_stage_info = {0};
+    // geom_shader_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    // geom_shader_stage_info.stage = VK_SHADER_STAGE_GEOMETRY_BIT;
+    // geom_shader_stage_info.module = geom_shader_module;
+    // geom_shader_stage_info.pName = "main";
 
+    VkPipelineShaderStageCreateInfo shader_stages[] = {vert_shader_stage_info, frag_shader_stage_info, /* geom_shader_stage_info */};
+    
     VkPipelineVertexInputStateCreateInfo vertex_input_info = {0};
     vertex_input_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertex_input_info.vertexBindingDescriptionCount = 0;
-    vertex_input_info.vertexAttributeDescriptionCount = 0;
+
+    VkVertexInputBindingDescription binding_description = {0};
+    VkVertexInputAttributeDescription attribute_description[ATTRIBUTE_COUNT] = {0};
+    get_binding_description(&binding_description);
+    get_attribute_descriptions(attribute_description);
+
+    vertex_input_info.vertexBindingDescriptionCount = 1;
+    vertex_input_info.vertexAttributeDescriptionCount = ATTRIBUTE_COUNT;
+    vertex_input_info.pVertexBindingDescriptions = &binding_description;
+    vertex_input_info.pVertexAttributeDescriptions = attribute_description;
 
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {0};
     input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+    // input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
     input_assembly.primitiveRestartEnable = VK_FALSE;
 
     VkViewport viewport = {0};
@@ -672,10 +838,10 @@ int create_graphics_pipeline() {
     rasterizer.depthClampEnable = VK_FALSE;
     rasterizer.rasterizerDiscardEnable = VK_FALSE;
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    rasterizer.lineWidth = 1.0f;
     rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
     rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
     rasterizer.depthBiasEnable = VK_FALSE;
+    rasterizer.lineWidth = 2.0f;
 
     VkPipelineMultisampleStateCreateInfo multisampling = {0};
     multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -709,7 +875,7 @@ int create_graphics_pipeline() {
 
     VkGraphicsPipelineCreateInfo pipeline_info = {0};
     pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    pipeline_info.stageCount = 2;
+    pipeline_info.stageCount = sizeof(shader_stages) / sizeof(shader_stages[0]);
     pipeline_info.pStages = shader_stages;
     pipeline_info.pVertexInputState = &vertex_input_info;
     pipeline_info.pInputAssemblyState = &input_assembly;
@@ -856,6 +1022,12 @@ int record_command_buffer(VkCommandBuffer command_buffer, uint32_t image_index) 
     vkCmdBeginRenderPass(command_buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline);
 
+        VkBuffer vertex_buffers[] = {vertex_buffer};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(command_buffer, 0, 1, vertex_buffers, offsets);
+
+        // vkCmdBindIndexBuffer(command_buffer, index_buffer, 0, VK_INDEX_TYPE_UINT16);
+        
         VkViewport viewport = {0};
         viewport.x = 0.0f;
         viewport.y = 0.0f;
@@ -871,7 +1043,14 @@ int record_command_buffer(VkCommandBuffer command_buffer, uint32_t image_index) 
         scissor.extent = swap_chain_extent;
         vkCmdSetScissor(command_buffer, 0, 1, &scissor);
     
-        vkCmdDraw(command_buffer, 3, 1, 0, 0);
+        uint32_t start_index = 0;
+        for (size_t i = 0; i < entities_count; i++) {
+            uint32_t shape_count = shapes[entities[i].shape_index].count;
+            vkCmdDraw(command_buffer, shape_count, 1, start_index, 0);
+            start_index = shape_count;
+        }
+        // vkCmdDraw(command_buffer, 2, 1, 0, 0);
+        // vkCmdDrawIndexed(command_buffer, INDICES_COUNT, 1, 0, 0, 0);
     vkCmdEndRenderPass(command_buffer);
 
     if (vkEndCommandBuffer(command_buffer) != VK_SUCCESS) {
@@ -950,14 +1129,17 @@ void cleanup() {
     
     cleanup_swap_chain();
 
+    // vkDestroyBuffer(device, index_buffer, NULL);
+    vkFreeMemory(device, index_buffer_memory, NULL);
 
+    vkDestroyBuffer(device, vertex_buffer, NULL);
+    vkFreeMemory(device, vertex_buffer_memory, NULL);
+    
     vkDestroyCommandPool(device, command_pool, NULL);
-
 
     vkDestroyPipeline(device, graphics_pipeline, NULL);
     vkDestroyPipelineLayout(device, pipeline_layout, NULL);
     vkDestroyRenderPass(device, render_pass, NULL);
-
     
     vkDestroyDevice(device, NULL);
 
@@ -972,6 +1154,134 @@ void cleanup() {
     glfwTerminate();
 }
 
+uint32_t find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags properties) {
+    VkPhysicalDeviceMemoryProperties mem_properies = {0};
+    vkGetPhysicalDeviceMemoryProperties(physical_device,  &mem_properies);
+
+    for (uint32_t i = 0; i < mem_properies.memoryTypeCount; i++) {
+        if (type_filter & (1 << i) && (mem_properies.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+}
+
+int create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
+                  VkMemoryPropertyFlags properties, VkBuffer *buffer,
+                  VkDeviceMemory *buffer_memory) {
+  VkBufferCreateInfo buffer_info = {0};
+  buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  buffer_info.size = size;
+  buffer_info.usage = usage;
+  buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+  if (vkCreateBuffer(device, &buffer_info, NULL, buffer) != VK_SUCCESS) {
+    fprintf(stderr, "Failed to crate vertex buffer!\n");
+    return -1;
+  }
+
+  VkMemoryRequirements mem_requirements;
+  vkGetBufferMemoryRequirements(device, *buffer, &mem_requirements);
+
+  VkMemoryAllocateInfo alloc_info = {0};
+  alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  alloc_info.allocationSize = mem_requirements.size;
+  alloc_info.memoryTypeIndex = find_memory_type(mem_requirements.memoryTypeBits, properties);
+
+  if (vkAllocateMemory(device, &alloc_info, NULL, buffer_memory) != VK_SUCCESS) {
+    fprintf(stderr, "Failed to allocate vertex buffer memory!\n");
+    return -1;
+  }
+
+  vkBindBufferMemory(device, *buffer, *buffer_memory, 0);
+
+  return 0;
+}
+
+void copy_buffer(VkBuffer src_buffer, VkBuffer dst_buffer, VkDeviceSize size) {
+    VkCommandBufferAllocateInfo alloc_info = {0};
+    alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    alloc_info.commandPool = command_pool;
+    alloc_info.commandBufferCount = 1;
+
+    VkCommandBuffer command_buffer;
+    vkAllocateCommandBuffers(device, &alloc_info, &command_buffer);
+
+    VkCommandBufferBeginInfo begin_info = {0};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    vkBeginCommandBuffer(command_buffer, &begin_info);
+
+        VkBufferCopy copy_region = {0};
+        copy_region.dstOffset = 0;
+        copy_region.dstOffset = 0;
+        copy_region.size = size;
+        vkCmdCopyBuffer(command_buffer, src_buffer, dst_buffer, 1, &copy_region);
+
+    vkEndCommandBuffer(command_buffer);
+
+    VkSubmitInfo submit_info = {0};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &command_buffer;
+
+    vkQueueSubmit(graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    vkQueueWaitIdle(graphics_queue);
+
+    vkFreeCommandBuffers(device, command_pool, 1, &command_buffer);
+}        
+
+void create_vertex_buffer() {
+    VkDeviceSize buffer_size = sizeof(vertices[0]) * VERTEX_COUNT;
+
+    // VkBuffer staging_buffer;
+    // VkDeviceMemory staging_buffer_memory;
+
+    VkBufferUsageFlags usage_flags = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    VkMemoryPropertyFlags properties_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    create_buffer(buffer_size, usage_flags, properties_flags, &staging_buffer, &staging_buffer_memory);
+
+    void *data;
+    vkMapMemory(device, staging_buffer_memory, 0, buffer_size, 0, &data);
+        memcpy(data, vertices, buffer_size);
+    vkUnmapMemory(device, staging_buffer_memory);
+    
+    usage_flags = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    properties_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;;
+    create_buffer(buffer_size, usage_flags, properties_flags, &vertex_buffer, &vertex_buffer_memory);
+    
+    copy_buffer(staging_buffer, vertex_buffer, buffer_size);
+
+    
+    vkDestroyBuffer(device, staging_buffer, NULL);
+    vkFreeMemory(device, staging_buffer_memory, NULL);
+}
+
+void create_index_buffer() {
+    VkDeviceSize buffer_size = sizeof(indices[0]) * INDICES_COUNT;
+
+    VkBuffer staging_buffer;
+    VkDeviceMemory staging_buffer_memory;
+
+    VkBufferUsageFlags usage_flags = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    VkMemoryPropertyFlags properties_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    create_buffer(buffer_size, usage_flags, properties_flags, &staging_buffer, &staging_buffer_memory);
+
+    void *data;
+    vkMapMemory(device, staging_buffer_memory, 0, buffer_size, 0, &data);
+        memcpy(data, indices, buffer_size);
+    vkUnmapMemory(device, staging_buffer_memory);
+    
+    usage_flags = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    properties_flags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    create_buffer(buffer_size, usage_flags, properties_flags, &index_buffer, &index_buffer_memory);
+    
+    copy_buffer(staging_buffer, index_buffer, buffer_size);
+    
+    vkDestroyBuffer(device, staging_buffer, NULL);
+    vkFreeMemory(device, staging_buffer_memory, NULL);
+}
 
 int init_vulkan() {
     int res = 0;
@@ -1008,6 +1318,9 @@ int init_vulkan() {
     res = create_command_pool();
     if (res < 0) return res;
 
+    create_vertex_buffer();
+    // create_index_buffer();
+    
     res = create_command_buffers();
     if (res < 0) return res;
 
@@ -1016,7 +1329,6 @@ int init_vulkan() {
     
     return 0;
 }
-
 
 void draw_frame() {
     VkFence frame_fence = frame_fences[frame_index];
@@ -1036,7 +1348,6 @@ void draw_frame() {
         fprintf(stderr, "Failed to aquire swap chain image!\n");
     }
     
-    // Only reset the fence if we are submitting work
     vkResetFences(device, 1, &frame_fence);
 
     VkCommandBuffer command_buffer = command_buffers[frame_index];
@@ -1083,9 +1394,200 @@ void draw_frame() {
     frame_index = (frame_index + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
+void uppdate_vertex_buffer() {
+    VkDeviceSize buffer_size = sizeof(vertices[0]) * VERTEX_COUNT;
+    void *data;
+    vkMapMemory(device, vertex_buffer_memory, 0, buffer_size, 0, &data);
+        memcpy(data, vertices, buffer_size);
+    vkUnmapMemory(device, vertex_buffer_memory);
+}
+
+
+
+void init_game() {
+    entities_count = 0;
+    // Ship
+    entities[0].shape_index = 0;
+    entities[0].pos[0] = 0.0f;
+    entities[0].pos[1] = 0.0f;
+    entities[0].speed[0] = 0.0f;
+    entities[0].speed[1] = 0.0f;
+    entities_count++;
+
+    entities[1].shape_index = 1;
+    entities[1].pos[0] = 0.0f;
+    entities[1].pos[1] = 0.0f;
+    entities[1].speed[0] = 0.0f;
+    entities[1].speed[1] = 0.0f;
+    entities_count++;
+}
+
+void fill_vertex_buffer() {
+    int start_vertex_index = 0;
+    for (size_t i = 0; i < entities_count  && i < 100; i++) {
+        int shape_index = entities[i].shape_index;
+
+        int shape_count = shapes[shape_index].count;
+        for (size_t k = 0; k < shape_count; k++) {
+            // printf("vertex %zu, x: %f, y: %f\n", start_vertex_index + k, shapes[shape_index].vertices[k].pos[0], shapes[shape_index].vertices[k].pos[0]);
+
+            vec2 in_vertex;
+            float scale = shapes[shape_index].scale;
+            float angle = entities[i].rotation;
+            in_vertex[0] = shapes[shape_index].vertices[k].pos[0];
+            in_vertex[1] = shapes[shape_index].vertices[k].pos[1];
+
+            mat2 scaling_matrix;
+            glm_mat2_identity(scaling_matrix);
+            scaling_matrix[0][0] = scale;
+            scaling_matrix[1][1] = scale;
+            
+            mat2 rotation_matrix;
+            glm_mat2_identity(rotation_matrix);
+            rotation_matrix[0][0] = cosf(angle);
+            rotation_matrix[0][1] = -sinf(angle);
+            rotation_matrix[1][0] = sinf(angle);
+            rotation_matrix[1][1] = cosf(angle);
+            
+            mat2 transform_matrix;
+            glm_mat2_mul(rotation_matrix, scaling_matrix, transform_matrix);
+
+            vec2 transformed_vertex;
+            glm_mat2_mulv(transform_matrix, in_vertex, transformed_vertex);
+
+            vertices[start_vertex_index + k].pos[0] = transformed_vertex[0] + entities[i].pos[0];
+            vertices[start_vertex_index + k].pos[1] = transformed_vertex[1] + entities[i].pos[1];
+            vertices[start_vertex_index + k].color[0] = shapes[shape_index].vertices[k].color[0];
+            vertices[start_vertex_index + k].color[1] = shapes[shape_index].vertices[k].color[1];
+            vertices[start_vertex_index + k].color[2] = shapes[shape_index].vertices[k].color[2];
+
+        }
+        start_vertex_index += shape_count;
+    }
+}
+
+
+void update_game() {
+    float max_speed = 1.1f;
+    float max_rotation_speed = 6.0f;
+    float player_impulse = 0.1f;
+    float player_rotation_impulse = 0.4f;
+    float friction = 0.001f;
+    float rotation_friction = 0.01f;
+
+
+    // Player ---
+    float rotation_impulse = 0.0f;
+    if (key_left) rotation_impulse = player_rotation_impulse ;
+    if (key_right) rotation_impulse = player_rotation_impulse  * -1.0f;
+
+    
+    if (key_up) {
+        float impulse_x = 0.0f;
+        float impulse_y = 0.0f;
+        impulse_x = -sinf(entities[0].rotation) * player_impulse;
+        impulse_y = -cosf(entities[0].rotation) * player_impulse;
+
+        entities[0].speed[0] += impulse_x;
+        entities[0].speed[1] += impulse_y;
+
+    }
+    
+    entities[0].rotation_speed = entities[0].rotation_speed + rotation_impulse; 
+    
+
+    // X/Y speed friction
+    if (entities[0].speed[0] >= 0) {
+        entities[0].speed[0] = fmax(0, entities[0].speed[0] - friction);
+        entities[0].speed[0] = fmin(max_speed, entities[0].speed[0]);
+    }
+    else if (entities[0].speed[0] <= 0) {
+        entities[0].speed[0] = fmin(0, entities[0].speed[0] + friction);
+        entities[0].speed[0] = fmax(-max_speed, entities[0].speed[0]);
+    }
+
+    if (entities[0].speed[1] >= 0) {
+        entities[0].speed[1] = fmax(0, entities[0].speed[1] - friction);
+        entities[0].speed[1] = fmin(max_speed, entities[0].speed[1]);
+    }
+    else if (entities[0].speed[1] <= 0) {
+        entities[0].speed[1] = fmin(0, entities[0].speed[1] + friction);
+        entities[0].speed[1] = fmax(-max_speed, entities[0].speed[1]);
+    }
+
+    // Angular speed friction
+    if (entities[0].rotation_speed >= 0) {
+        entities[0].rotation_speed = fmax(0, entities[0].rotation_speed - rotation_friction);
+        entities[0].rotation_speed = fmin(max_rotation_speed, entities[0].rotation_speed);
+    }
+    else if (entities[0].rotation_speed <= 0) {
+        entities[0].rotation_speed = fmin(0, entities[0].rotation_speed + rotation_friction);
+        entities[0].rotation_speed = fmax(-max_rotation_speed, entities[0].rotation_speed);
+    }
+
+    
+
+    entities[0].pos[0] += entities[0].speed[0] * delta_time;
+    entities[0].pos[1] += entities[0].speed[1] * delta_time;
+    entities[0].rotation += entities[0].rotation_speed * delta_time;
+    if (entities[0].pos[0] > 1.0f) {
+        entities[0].pos[0] = -1.0f;
+    }
+    else if (entities[0].pos[0] < -1.0f) {
+        entities[0].pos[0] = 1.0f;
+    }
+    if (entities[0].pos[1] > 1.0f) {
+        entities[0].pos[1] = -1.0f;
+    }
+    else if (entities[0].pos[1] < -1.0f) {
+        entities[0].pos[1] = 1.0f;
+    }
+    
+
+    
+    // Astroids ---
+    for (int i = 1; i < entities_count; i++) {
+        entities[i].pos[0] += entities[i].speed[0] * delta_time;
+        entities[i].pos[1] += entities[i].speed[1] * delta_time;
+        entities[i].rotation += entities[i].rotation_speed * delta_time;
+    }
+    
+}
+
 void main_loop() {
+    last_time = glfwGetTime();
+    double fps = 0.0f;    
+    double last_fps_update = 0.0f;
+
+    bool right = true;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        double current_time = glfwGetTime();
+        delta_time = current_time - last_time;
+
+        // Clamp delta_time. This is needed beacause when resizing main loop does not get executed.
+        delta_time = delta_time > max_delta_time ? max_delta_time : delta_time; 
+        last_time = current_time;
+        frame_count++;
+        last_fps_update += delta_time;
+        
+        if (last_fps_update >= 1.0f) {
+            char title[40];
+            sprintf(title, "Astroids FPS: %d", frame_count);
+            glfwSetWindowTitle(window, title);
+
+            frame_count = 0;
+            last_fps_update = 0.0f;
+        }
+
+        update_game();
+        
+        
+        fill_vertex_buffer();
+
+        uppdate_vertex_buffer();
+
         draw_frame();
     }
 
@@ -1097,6 +1599,8 @@ int main() {
     init_window();
     res = init_vulkan();
     if (res < 0) goto exit;
+
+    init_game();
 
     main_loop();
 
