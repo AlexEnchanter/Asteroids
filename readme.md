@@ -1,6 +1,6 @@
 # Work in progress
 
-Astroids in using Vulkan, glfw, glm on Windows.
+Astroids in C using Vulkan, glfw, glm on Windows.
 
 Only thing that is implemented atm is the ship.
 
